@@ -28,25 +28,25 @@
 #include <vector>
 #include <wordexp.h>
 
+bool showTable = false;
+
 void parseError(std::string msg, SimpleCommand *currentSimpleCommand) {
   fprintf(stderr, "Parse error: %s\n", msg.c_str());
   Command::_currentCommand.insertSimpleCommand(currentSimpleCommand);
   Command::_currentCommand.clear();
 }
 
-bool readWord(std::vector<Token> &tokens, std::string &result,size_t &i) {
+bool readWord(std::vector<Token> &tokens, std::string &result, size_t &i) {
   std::string word = tokens[i].value;
   if (word[0] != '"' && word[0] != '\'') {
     result = word;
     return true;
-  }
-  else {
+  } else {
     char quote = word[0];
-    if(word .size() >=2 && word[word.size() - 1] == quote) {
+    if (word.size() >= 2 && word[word.size() - 1] == quote) {
       result = word.substr(1, word.size() - 2);
       return true;
-    }
-    else {
+    } else {
       std::string combinedWord = word.substr(1);
       i++;
       while (i < tokens.size() && tokens[i].type != TOKEN_EOF) {
@@ -61,7 +61,6 @@ bool readWord(std::vector<Token> &tokens, std::string &result,size_t &i) {
         i++;
       }
       return false; // No closing quote found
-
     }
   }
 }
@@ -75,13 +74,12 @@ void parse(std::vector<Token> &tokens) {
   for (size_t i = 0; i < tokens.size(); i++) {
     switch (tokens[i].type) {
     case TOKEN_COMMAND:
-    case TOKEN_ARGUMENT:
-    {
-        std::string word;
-        if (!readWord(tokens, word, i)) {
-          parseError("Unmatched quote in argument.", currentSimpleCommand);
-          return;
-        }
+    case TOKEN_ARGUMENT: {
+      std::string word;
+      if (!readWord(tokens, word, i)) {
+        parseError("Unmatched quote in argument.", currentSimpleCommand);
+        return;
+      }
       currentSimpleCommand->insertArgument(strdup(word.c_str()));
       break;
     }
@@ -125,11 +123,13 @@ void parse(std::vector<Token> &tokens) {
 
       bool duplicate = false;
       if (type == TOKEN_REDIRECT || type == TOKEN_APPEND) {
-        duplicate = (Command::_currentCommand._outFile != 0);
+        duplicate = (Command::_currentCommand._outFile != 0) || (Command::_currentCommand._out_error != 0);
       } else if (type == TOKEN_INPUT) {
         duplicate = (Command::_currentCommand._inputFile != 0);
-      } else if (type == TOKEN_ERROR || type == TOKEN_REDIRECT_AND_ERROR) {
+      } else if (type == TOKEN_ERROR) {
         duplicate = (Command::_currentCommand._errFile != 0);
+      } else if (type == TOKEN_REDIRECT_AND_ERROR) {
+        duplicate = (Command::_currentCommand._errFile != 0) || (Command::_currentCommand._outFile != 0);
       }
 
       if (duplicate) {
@@ -284,11 +284,113 @@ void Command::print() {
   printf("\n\n");
 }
 
+bool redirectTo(const char *file, int flags, int desc) {
+  int fd = open(file, flags, 0644);
+  if (fd < 0) {
+    perror(file);
+
+    return false;
+  }
+  dup2(fd, desc);
+  close(fd);
+  return true;
+}
+
+void restoreAndClose(int defaultin, int defaultout, int defaulterr) {
+  dup2(defaultin, 0);
+  dup2(defaultout, 1);
+  dup2(defaulterr, 2);
+  close(defaultin);
+  close(defaultout);
+  close(defaulterr);
+}
+
 void Command::execute() {
-  print();
-  /*
-      Write your code here
-  */
+  if (showTable) {
+    print();
+  }
+
+  if (_numberOfSimpleCommands == 1) {
+    if (strcmp(_simpleCommands[0]->_arguments[0], "exit") == 0) {
+      printf("Good bye!!\n");
+      exit(0);
+    }
+    if (strcmp(_simpleCommands[0]->_arguments[0], "cd") == 0) {
+      const char *dir = (_simpleCommands[0]->_arguments[1])
+                            ? _simpleCommands[0]->_arguments[1]
+                            : getenv("HOME");
+      if (dir == NULL || chdir(dir) != 0) {
+        perror("cd");
+      }
+      clear();
+      return;
+    }
+  }
+
+  pid_t lastPid = -1;
+  fflush(stdout);
+
+  int defaultin = dup(0);
+  int defaultout = dup(1);
+  int defaulterr = dup(2);
+
+  if (_inputFile) {
+    if (!redirectTo(_inputFile, O_RDONLY, 0)) {
+      restoreAndClose(defaultin, defaultout, defaulterr);
+      clear();
+      return;
+    }
+  }
+
+  if (_outFile) {
+    if (!redirectTo(_outFile,
+                    O_WRONLY | O_CREAT | (_append ? O_APPEND : O_TRUNC), 1)) {
+      restoreAndClose(defaultin, defaultout, defaulterr);
+      clear();
+      return;
+    }
+  }
+
+  if (_errFile) {
+    if (!redirectTo(_errFile,
+                    O_WRONLY | O_CREAT | (_out_error ? O_APPEND : O_TRUNC),
+                    2)) {
+      restoreAndClose(defaultin, defaultout, defaulterr);
+      clear();
+      return;
+    }
+    if (_out_error) {
+      dup2(2, 1);
+    }
+  }
+
+  for (int i = 0; i < _numberOfSimpleCommands; i++) {
+    pid_t pid = fork();
+
+    if (pid < 0) {
+      perror("fork");
+      break;
+    }
+
+    if (pid == 0) {
+      close(defaultin);
+      close(defaultout);
+      close(defaulterr);
+      signal(SIGINT, SIG_DFL);
+      execvp(_simpleCommands[i]->_arguments[0], _simpleCommands[i]->_arguments);
+      perror(_simpleCommands[i]->_arguments[0]);
+      _exit(1);
+    }
+
+    lastPid = pid;
+  }
+
+  restoreAndClose(defaultin, defaultout, defaulterr);
+
+  if (!_background && lastPid > 0) {
+    int status;
+    waitpid(lastPid, &status, 0);
+  }
 
   clear();
 }
@@ -313,6 +415,7 @@ Command Command::_currentCommand;
 SimpleCommand *Command::_currentSimpleCommand;
 
 int main() {
+  signal(SIGINT, SIG_IGN);
   Command::_currentCommand.prompt();
   return 0;
 }
