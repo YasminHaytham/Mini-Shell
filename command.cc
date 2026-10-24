@@ -123,13 +123,15 @@ void parse(std::vector<Token> &tokens) {
 
       bool duplicate = false;
       if (type == TOKEN_REDIRECT || type == TOKEN_APPEND) {
-        duplicate = (Command::_currentCommand._outFile != 0) || (Command::_currentCommand._out_error != 0);
+        duplicate = (Command::_currentCommand._outFile != 0) ||
+                    (Command::_currentCommand._out_error != 0);
       } else if (type == TOKEN_INPUT) {
         duplicate = (Command::_currentCommand._inputFile != 0);
       } else if (type == TOKEN_ERROR) {
         duplicate = (Command::_currentCommand._errFile != 0);
       } else if (type == TOKEN_REDIRECT_AND_ERROR) {
-        duplicate = (Command::_currentCommand._errFile != 0) || (Command::_currentCommand._outFile != 0);
+        duplicate = (Command::_currentCommand._errFile != 0) ||
+                    (Command::_currentCommand._outFile != 0);
       }
 
       if (duplicate) {
@@ -328,6 +330,8 @@ void Command::execute() {
   }
 
   pid_t lastPid = -1;
+  int fdpipe[2];
+  int nextIn = -1;
   fflush(stdout);
 
   int defaultin = dup(0);
@@ -342,29 +346,35 @@ void Command::execute() {
     }
   }
 
-  if (_outFile) {
-    if (!redirectTo(_outFile,
-                    O_WRONLY | O_CREAT | (_append ? O_APPEND : O_TRUNC), 1)) {
-      restoreAndClose(defaultin, defaultout, defaulterr);
-      clear();
-      return;
-    }
-  }
-
-  if (_errFile) {
-    if (!redirectTo(_errFile,
-                    O_WRONLY | O_CREAT | (_out_error ? O_APPEND : O_TRUNC),
-                    2)) {
-      restoreAndClose(defaultin, defaultout, defaulterr);
-      clear();
-      return;
-    }
-    if (_out_error) {
-      dup2(2, 1);
-    }
-  }
-
   for (int i = 0; i < _numberOfSimpleCommands; i++) {
+    bool isLastCommand = (i == _numberOfSimpleCommands - 1);
+    if (nextIn != -1) {
+      dup2(nextIn, 0);
+      close(nextIn);
+      nextIn = -1;
+    }
+    if (isLastCommand) {
+      dup2(defaultout, 1);
+      if (_outFile) {
+        if (!redirectTo(_outFile,
+                        O_WRONLY | O_CREAT | (_append ? O_APPEND : O_TRUNC),
+                        1)) {
+          break;
+        }
+      }
+
+      if (_errFile) {
+        if (!redirectTo(_errFile,
+                        O_WRONLY | O_CREAT | (_out_error ? O_APPEND : O_TRUNC),
+                        2)) {
+          break;
+        }
+        if (_out_error) {
+          dup2(2, 1);
+        }
+      }
+    } else {
+    }
     pid_t pid = fork();
 
     if (pid < 0) {
