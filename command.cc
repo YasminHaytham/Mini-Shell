@@ -345,7 +345,15 @@ void Command::execute() {
       return;
     }
   }
-
+  if (_errFile) {
+    if (!redirectTo(_errFile,
+                    O_WRONLY | O_CREAT | (_out_error ? O_APPEND : O_TRUNC),
+                    2)) {
+      restoreAndClose(defaultin, defaultout, defaulterr);
+      clear();
+      return;
+    }
+  }
   for (int i = 0; i < _numberOfSimpleCommands; i++) {
     bool isLastCommand = (i == _numberOfSimpleCommands - 1);
     if (nextIn != -1) {
@@ -362,18 +370,17 @@ void Command::execute() {
           break;
         }
       }
-
-      if (_errFile) {
-        if (!redirectTo(_errFile,
-                        O_WRONLY | O_CREAT | (_out_error ? O_APPEND : O_TRUNC),
-                        2)) {
-          break;
-        }
-        if (_out_error) {
-          dup2(2, 1);
-        }
+      if (_out_error) {
+        dup2(2, 1);
       }
     } else {
+      if (pipe(fdpipe) < 0) {
+        perror("pipe");
+        break;
+      }
+      dup2(fdpipe[1], 1);
+      close(fdpipe[1]);
+      nextIn = fdpipe[0];
     }
     pid_t pid = fork();
 
@@ -386,6 +393,9 @@ void Command::execute() {
       close(defaultin);
       close(defaultout);
       close(defaulterr);
+      if (nextIn != -1) {
+        close(nextIn);
+      }
       signal(SIGINT, SIG_DFL);
       execvp(_simpleCommands[i]->_arguments[0], _simpleCommands[i]->_arguments);
       perror(_simpleCommands[i]->_arguments[0]);
@@ -394,7 +404,9 @@ void Command::execute() {
 
     lastPid = pid;
   }
-
+  if (nextIn != -1) {
+        close(nextIn);
+      }
   restoreAndClose(defaultin, defaultout, defaulterr);
 
   if (!_background && lastPid > 0) {
