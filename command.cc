@@ -29,7 +29,6 @@
 #include <vector>
 #include <wordexp.h>
 
-bool showTable = false;
 int logFd = -1;
 
 void parseError(std::string msg, SimpleCommand *currentSimpleCommand) {
@@ -38,13 +37,16 @@ void parseError(std::string msg, SimpleCommand *currentSimpleCommand) {
   Command::_currentCommand.clear();
 }
 
-bool readWord(std::vector<Token> &tokens, std::string &result, size_t &i) {
+bool readWord(std::vector<Token> &tokens, std::string &result, size_t &i,
+              bool &quoted) {
   std::string word = tokens[i].value;
+  quoted = false;
   if (word[0] != '"' && word[0] != '\'') {
     result = word;
     return true;
   } else {
     char quote = word[0];
+    quoted = true;
     if (word.size() >= 2 && word[word.size() - 1] == quote) {
       result = word.substr(1, word.size() - 2);
       return true;
@@ -78,12 +80,27 @@ void parse(std::vector<Token> &tokens) {
     case TOKEN_COMMAND:
     case TOKEN_ARGUMENT: {
       std::string word;
-      if (!readWord(tokens, word, i)) {
+      bool quoted = false;
+
+      if (!readWord(tokens, word, i, quoted)) {
         parseError("Unmatched quote in argument.", currentSimpleCommand);
         return;
       }
-      currentSimpleCommand->insertArgument(strdup(word.c_str()));
-      break;
+      bool expanded = false;
+      if (!quoted && word.find_first_of("*?") != std::string::npos) {
+        glob_t g;
+        if (glob(word.c_str(), 0, NULL, &g) == 0) {
+          for (size_t j = 0; j < g.gl_pathc; j++) {
+            currentSimpleCommand->insertArgument(strdup(g.gl_pathv[j]));
+          }
+          expanded = true;
+        }
+        globfree(&g);
+      }
+      if (!expanded) {
+        currentSimpleCommand->insertArgument(strdup(word.c_str()));
+      } 
+        break;
     }
     case TOKEN_EOF:
       if (currentSimpleCommand->_numberOfArguments > 0) {
@@ -315,11 +332,9 @@ void logChild(pid_t pid) {
   write(logFd, msg, len);
 }
 
-
 void Command::execute() {
-  if (showTable) {
     print();
-  }
+  
 
   if (_numberOfSimpleCommands == 1) {
     if (strcmp(_simpleCommands[0]->_arguments[0], "exit") == 0) {
