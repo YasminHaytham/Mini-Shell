@@ -12,6 +12,7 @@
 #include "command.h"
 #include "tokenizer.h"
 #include <cctype>
+#include <errno.h>
 #include <fcntl.h>
 #include <glob.h>
 #include <iostream>
@@ -29,6 +30,7 @@
 #include <wordexp.h>
 
 bool showTable = false;
+int logFd = -1;
 
 void parseError(std::string msg, SimpleCommand *currentSimpleCommand) {
   fprintf(stderr, "Parse error: %s\n", msg.c_str());
@@ -307,6 +309,13 @@ void restoreAndClose(int defaultin, int defaultout, int defaulterr) {
   close(defaulterr);
 }
 
+void logChild(pid_t pid) {
+  char msg[64];
+  int len = snprintf(msg, sizeof(msg), "Child process %d terminated\n", pid);
+  write(logFd, msg, len);
+}
+
+
 void Command::execute() {
   if (showTable) {
     print();
@@ -405,13 +414,18 @@ void Command::execute() {
     lastPid = pid;
   }
   if (nextIn != -1) {
-        close(nextIn);
-      }
+    close(nextIn);
+  }
   restoreAndClose(defaultin, defaultout, defaulterr);
 
   if (!_background && lastPid > 0) {
     int status;
-    waitpid(lastPid, &status, 0);
+    pid_t r;
+    do {
+      r = waitpid(lastPid, &status, 0);
+    } while (r < 0 && errno == EINTR);
+    if (r > 0)
+      logChild(r);
   }
 
   clear();
@@ -433,11 +447,27 @@ void Command::prompt() {
   }
 }
 
+void childHandler(int sig) {
+  int err = errno;
+  pid_t pid;
+  int status;
+  while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+    logChild(pid);
+  }
+  errno = err;
+}
+
 Command Command::_currentCommand;
 SimpleCommand *Command::_currentSimpleCommand;
 
 int main() {
   signal(SIGINT, SIG_IGN);
+  logFd = open("shell.log", O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+  struct sigaction sa;
+  sa.sa_handler = childHandler;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+  sigaction(SIGCHLD, &sa, NULL);
   Command::_currentCommand.prompt();
   return 0;
 }
